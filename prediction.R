@@ -17,8 +17,7 @@ tcs_ts <- ts(
 )
 
 # Automatically choose ARIMA model
-model <- auto.arima(tcs_ts)
-
+model <- auto.arima(tcs_ts, seasonal = FALSE)
 # Forecast next 30 trading days
 forecast_result <- forecast(
   model,
