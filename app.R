@@ -6,6 +6,8 @@ library(forecast)
 library(reshape2)
 library(bslib)
 library(DT)
+library(SHAPforxgboost)
+library(shinycssloaders)
 
 # -----------------------------
 # 1. Load & Merge Datasets
@@ -22,6 +24,10 @@ portfolio_data$Regime <- as.factor(portfolio_data$Regime)
 market_vol <- aggregate(Daily_Return ~ Regime, data = regimes, FUN = sd)
 low_vol_regime <- as.character(market_vol$Regime[which.min(market_vol$Daily_Return)])
 high_vol_regime <- as.character(market_vol$Regime[which.max(market_vol$Daily_Return)])
+
+# Load XAI Data
+shap_data <- readRDS("data/shap_data.rds")
+xgb_features <- readRDS("data/xgb_features.rds")
 
 # -----------------------------
 # 2. Helper Functions
@@ -45,17 +51,16 @@ calc_max_drawdown <- function(x) {
 # -----------------------------
 ui <- fluidPage(
   
-  # Apply dark mode theme with techy accents
   theme = bs_theme(
-    bg = "#121212", 
-    fg = "#E0E0E0", 
-    primary = "#00E676", 
-    base_font = font_google("Inter"),
-    code_font = font_google("Fira Code"),
+    bg = "#121212", fg = "#E0E0E0", primary = "#00E676", 
+    base_font = font_google("Inter"), code_font = font_google("Fira Code"),
     bootswatch = "darkly"
   ),
   
-  titlePanel(tags$h2("Institutional Risk Parity & Predictive Forecasting System", style = "font-weight: 700; color: #ffffff;")),
+  titlePanel(
+    title = tags$h2("Institutional Risk Parity & Predictive Forecasting System", style = "font-weight: 700; color: #ffffff;"),
+    windowTitle = "Risk Parity System"
+  ),
   
   uiOutput("marketSignal"),
   hr(style = "border-top: 1px solid #333;"),
@@ -64,48 +69,43 @@ ui <- fluidPage(
     sidebarPanel(
       style = "background-color: #1e1e1e; border: 1px solid #333; border-radius: 8px;",
       h4("System Parameters", style = "color: #00E676;"),
-      selectInput(
-        "stock",
-        "Target Asset (Forecasting):",
-        choices = unique(stock_data$Stock)
-      ),
+      selectInput("stock", "Target Asset (Forecasting):", choices = unique(stock_data$Stock)),
       hr(style = "border-top: 1px solid #333;"),
-      radioButtons(
-        "regime_view",
-        "Active Market Regime (Optimization):",
-        choices = list(
-          "Overall (Static Assumption)" = "All",
-          "Regime 1 (State A)" = "1",
-          "Regime 2 (State B)" = "2"
-        ),
-        selected = "All"
+      radioButtons("regime_view", "Active Market Regime (Optimization):",
+                   choices = list("Overall (Static Assumption)" = "All", "Regime 1 (State A)" = "1", "Regime 2 (State B)" = "2"),
+                   selected = "All"
       ),
       helpText("Terminal is live. Charts support click-drag zooming and exact value isolation.", style = "color: #888;")
     ),
     
     mainPanel(
       tabsetPanel(
+        tabPanel("Explainable AI (XAI)",
+                 br(),
+                 h4("XGBoost SHAP Value Explanations (TCS Proof-of-Concept)", style = "color: #00E676;"),
+                 p("Decoding the black box: This chart reveals exactly which variables the machine learning model prioritizes when forecasting tomorrow's market direction.", style = "color: #888;"),
+                 withSpinner(plotlyOutput("shapPlot", height = "500px"), type = 8, color = "#00E676")
+        ),
         tabPanel("Dynamic Allocation", 
                  br(),
                  h4("Optimal Risk Parity vs. Naive Equal-Weight", style = "color: #00E676;"),
-                 plotlyOutput("weightPlot"),
+                 withSpinner(plotlyOutput("weightPlot"), type = 8, color = "#00E676"),
                  br(),
                  h4("Risk Metrics (Live Datagrid)", style = "color: #00E676;"),
-                 DTOutput("riskTable") # Upgraded to interactive datatable
+                 withSpinner(DTOutput("riskTable"), type = 8, color = "#00E676")
         ),
         tabPanel("Forecasting Engine",
                  br(),
                  h4("Live 30-Day ARIMA Projection", style = "color: #00E676;"),
-                 p("Calculating forward-looking statistical trends for the selected asset...", style = "color: #888;"),
-                 plotlyOutput("forecastPlot")
+                 withSpinner(plotlyOutput("forecastPlot"), type = 8, color = "#00E676")
         ),
         tabPanel("Market States & Heatmap", 
                  br(),
                  h4("Hidden Markov Model: Market Regimes", style = "color: #00E676;"),
-                 plotlyOutput("regimePlot"),
+                 withSpinner(plotlyOutput("regimePlot"), type = 8, color = "#00E676"),
                  hr(style = "border-top: 1px solid #333;"),
                  h4("Asset Correlation Matrix", style = "color: #00E676;"),
-                 plotlyOutput("heatmapPlot")
+                 withSpinner(plotlyOutput("heatmapPlot"), type = 8, color = "#00E676")
         )
       )
     )
@@ -118,37 +118,29 @@ ui <- fluidPage(
 server <- function(input, output) {
   
   active_data <- reactive({
-    if (input$regime_view == "All") {
-      portfolio_data
-    } else {
-      subset(portfolio_data, Regime == input$regime_view)
-    }
+    if (input$regime_view == "All") portfolio_data else subset(portfolio_data, Regime == input$regime_view)
   })
   
-  # Upgraded Neon Banner
   output$marketSignal <- renderUI({
     if (input$regime_view == "All") {
       div(style = "padding: 15px; background-color: #2c2c2c; color: #ffffff; border-left: 5px solid #888; border-radius: 4px; font-family: 'Fira Code', monospace;",
           "SYSTEM STATUS: Aggregate View (Static Market Assumption)")
     } else if (input$regime_view == low_vol_regime) {
-      div(style = "padding: 15px; background-color: rgba(0, 230, 118, 0.1); color: #00E676; border-left: 5px solid #00E676; border-radius: 4px; font-family: 'Fira Code', monospace; box-shadow: 0 0 10px rgba(0,230,118,0.2);",
+      div(style = "padding: 15px; background-color: rgba(0, 230, 118, 0.1); color: #00E676; border-left: 5px solid #00E676; border-radius: 4px; box-shadow: 0 0 10px rgba(0,230,118,0.2); font-family: 'Fira Code', monospace;",
           "🟢 RISK-ON: Low Volatility Market Regime Detected. Standard asset correlation expected.")
     } else {
-      div(style = "padding: 15px; background-color: rgba(255, 23, 68, 0.1); color: #FF1744; border-left: 5px solid #FF1744; border-radius: 4px; font-family: 'Fira Code', monospace; box-shadow: 0 0 10px rgba(255,23,68,0.2);",
+      div(style = "padding: 15px; background-color: rgba(255, 23, 68, 0.1); color: #FF1744; border-left: 5px solid #FF1744; border-radius: 4px; box-shadow: 0 0 10px rgba(255,23,68,0.2); font-family: 'Fira Code', monospace;",
           "🔴 RISK-OFF: High Volatility Shock Detected. Deleveraging active. Correlations may converge to 1.")
     }
   })
   
-  output$weightPlot <- renderPlotly({
-    w_data <- calc_risk_parity(active_data())
-    melted_w <- melt(w_data[, c("Stock", "Optimal_Weight", "Naive_Weight")], id.vars = "Stock")
+  # Explainable AI Plot (Fixed Legend & Plain English Scale)
+  output$shapPlot <- renderPlotly({
+    shap_long <- shap.prep(shap_contrib = shap_data, X_train = xgb_features)
     
-    p <- ggplot(melted_w, aes(x = Stock, y = value, fill = variable, text = paste("Allocation:", round(value*100, 2), "%"))) +
-      geom_bar(stat = "identity", position = "dodge") +
-      scale_fill_manual(values = c("Optimal_Weight" = "#00E676", "Naive_Weight" = "#424242"),
-                        labels = c("Risk Parity (Model)", "20% Equal-Weight")) +
-      scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
-      labs(y = "Capital Allocation", x = "", fill = "Strategy") +
+    p <- shap.plot.summary(shap_long) + 
+      geom_hline(yintercept = 0, color = "#ffffff", linetype = "dashed", linewidth = 0.8) +
+      scale_y_continuous(name = "← Drives Price DOWN       |       Drives Price UP →") +
       theme_minimal() +
       theme(
         plot.background = element_rect(fill = "transparent", color = NA),
@@ -156,99 +148,76 @@ server <- function(input, output) {
         text = element_text(color = "#E0E0E0"),
         axis.text = element_text(color = "#A0A0A0"),
         panel.grid.major = element_line(color = "#333333"),
-        panel.grid.minor = element_blank()
+        panel.grid.minor = element_blank(),
+        legend.position = "none"
       )
     
-    ggplotly(p, tooltip = "text") %>% 
-      layout(hovermode = "x unified", paper_bgcolor = 'rgba(0,0,0,0)', plot_bgcolor = 'rgba(0,0,0,0)')
+    ggplotly(p) %>% 
+      layout(
+        paper_bgcolor = 'rgba(0,0,0,0)', 
+        plot_bgcolor = 'rgba(0,0,0,0)',
+        hovermode = "closest"
+      )
   })
   
-  # Upgraded Interactive DataGrid
+  output$weightPlot <- renderPlotly({
+    w_data <- calc_risk_parity(active_data())
+    melted_w <- melt(w_data[, c("Stock", "Optimal_Weight", "Naive_Weight")], id.vars = "Stock")
+    p <- ggplot(melted_w, aes(x = Stock, y = value, fill = variable, text = paste("Allocation:", round(value*100, 2), "%"))) +
+      geom_bar(stat = "identity", position = "dodge") +
+      scale_fill_manual(values = c("Optimal_Weight" = "#00E676", "Naive_Weight" = "#424242"), labels = c("Risk Parity (Model)", "20% Equal-Weight")) +
+      scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+      labs(y = "Capital Allocation", x = "", fill = "Strategy") +
+      theme_minimal() +
+      theme(plot.background = element_rect(fill = "transparent", color = NA), panel.background = element_rect(fill = "transparent", color = NA),
+            text = element_text(color = "#E0E0E0"), axis.text = element_text(color = "#A0A0A0"), panel.grid.major = element_line(color = "#333333"))
+    ggplotly(p, tooltip = "text") %>% layout(hovermode = "x unified", paper_bgcolor = 'rgba(0,0,0,0)', plot_bgcolor = 'rgba(0,0,0,0)')
+  })
+  
   output$riskTable <- renderDT({
     dat <- active_data()
-    
     mean_ret <- aggregate(Daily_Return ~ Stock, data = dat, FUN = mean)
     vol_ret <- aggregate(Daily_Return ~ Stock, data = dat, FUN = sd)
     max_dd <- aggregate(Adjusted ~ Stock, data = dat, FUN = calc_max_drawdown)
-    
-    res <- merge(mean_ret, vol_ret, by = "Stock")
-    res <- merge(res, max_dd, by = "Stock")
+    res <- merge(merge(mean_ret, vol_ret, by = "Stock"), max_dd, by = "Stock")
     colnames(res) <- c("Asset", "Avg_Daily_Return", "Volatility", "Max_Drawdown_Pct")
-    
     res$Annualized_Sharpe <- round((res$Avg_Daily_Return / res$Volatility) * sqrt(252), 2)
     res$Avg_Daily_Return <- round(res$Avg_Daily_Return, 3)
     res$Volatility <- round(res$Volatility, 3)
     res$Max_Drawdown_Pct <- round(res$Max_Drawdown_Pct, 2)
-    
     res <- res[order(-res$Annualized_Sharpe), ]
-    
-    datatable(res, 
-              options = list(pageLength = 5, dom = 't', 
-                             initComplete = JS(
-                               "function(settings, json) {",
-                               "$(this.api().table().header()).css({'background-color': '#1e1e1e', 'color': '#00E676'});",
-                               "}")),
-              rownames = FALSE,
-              class = 'cell-border stripe hover') %>%
+    datatable(res, options = list(pageLength = 5, dom = 't', initComplete = JS("function(settings, json) { $(this.api().table().header()).css({'background-color': '#1e1e1e', 'color': '#00E676'}); }")), rownames = FALSE, class = 'cell-border stripe hover') %>%
       formatPercentage(c('Avg_Daily_Return', 'Volatility', 'Max_Drawdown_Pct'), 2) %>%
       formatStyle(columns = colnames(res), backgroundColor = '#121212', color = '#E0E0E0')
   })
   
   output$heatmapPlot <- renderPlotly({
     dat <- active_data()
-    ret_wide <- reshape(dat[, c("Date", "Stock", "Daily_Return")], 
-                        idvar = "Date", timevar = "Stock", direction = "wide")
-    ret_wide <- na.omit(ret_wide)
+    ret_wide <- na.omit(reshape(dat[, c("Date", "Stock", "Daily_Return")], idvar = "Date", timevar = "Stock", direction = "wide"))
     colnames(ret_wide) <- gsub("Daily_Return.", "", colnames(ret_wide))
-    
     cor_mat <- cor(ret_wide[, -1])
-    
-    plot_ly(x = colnames(cor_mat), y = rownames(cor_mat), z = cor_mat, 
-            type = "heatmap", colorscale = "Viridis") %>%
-      layout(margin = list(l=100, b=100), paper_bgcolor = 'rgba(0,0,0,0)', plot_bgcolor = 'rgba(0,0,0,0)',
-             font = list(color = '#E0E0E0'))
+    plot_ly(x = colnames(cor_mat), y = rownames(cor_mat), z = cor_mat, type = "heatmap", colorscale = "Viridis") %>%
+      layout(margin = list(l=100, b=100), paper_bgcolor = 'rgba(0,0,0,0)', plot_bgcolor = 'rgba(0,0,0,0)', font = list(color = '#E0E0E0'))
   })
   
   output$regimePlot <- renderPlotly({
-    p <- ggplot(regimes, aes(x = Date, y = Daily_Return, color = as.factor(Regime), 
-                             text = paste("Date:", Date, "<br>Return:", round(Daily_Return, 2), "%<br>Regime:", Regime))) +
-      geom_point(alpha = 0.6) +
-      scale_color_manual(values = c("1" = "#00b4d8", "2" = "#FF1744")) +
+    p <- ggplot(regimes, aes(x = Date, y = Daily_Return, color = as.factor(Regime), text = paste("Date:", Date, "<br>Return:", round(Daily_Return, 2), "%<br>Regime:", Regime))) +
+      geom_point(alpha = 0.6) + scale_color_manual(values = c("1" = "#00b4d8", "2" = "#FF1744")) +
       labs(x = "Date", y = "Market Daily Return (%)", color = "State") +
-      theme_minimal() +
-      theme(
-        plot.background = element_rect(fill = "transparent", color = NA),
-        panel.background = element_rect(fill = "transparent", color = NA),
-        text = element_text(color = "#E0E0E0"),
-        axis.text = element_text(color = "#A0A0A0"),
-        panel.grid.major = element_line(color = "#333333")
-      )
-    
+      theme_minimal() + theme(plot.background = element_rect(fill = "transparent", color = NA), panel.background = element_rect(fill = "transparent", color = NA), text = element_text(color = "#E0E0E0"), axis.text = element_text(color = "#A0A0A0"), panel.grid.major = element_line(color = "#333333"))
     ggplotly(p, tooltip = "text") %>% layout(paper_bgcolor = 'rgba(0,0,0,0)', plot_bgcolor = 'rgba(0,0,0,0)')
   })
   
   output$forecastPlot <- renderPlotly({
     stock_sub <- subset(portfolio_data, Stock == input$stock)
-    ts_data <- ts(stock_sub$Adjusted, frequency = 252)
-    
-    fit <- auto.arima(ts_data, seasonal = FALSE)
-    fc <- forecast(fit, h = 30)
-    
+    fc <- forecast(auto.arima(ts(stock_sub$Adjusted, frequency = 252), seasonal = FALSE), h = 30)
     future_dates <- seq(max(stock_sub$Date) + 1, by = "day", length.out = 30)
-    
     plot_ly() %>%
-      add_lines(x = stock_sub$Date, y = stock_sub$Adjusted, name = "Historical Price", line = list(color = "#E0E0E0")) %>%
+      add_lines(x = stock_sub$Date, y = stock_sub$Adjusted, name = "Historical", line = list(color = "#E0E0E0")) %>%
       add_lines(x = future_dates, y = fc$mean, name = "30-Day Forecast", line = list(color = "#00E676", dash = "dash")) %>%
       add_ribbons(x = future_dates, ymin = fc$lower[,2], ymax = fc$upper[,2], name = "95% Confidence", fillcolor = "rgba(0, 230, 118, 0.15)", line = list(color = "transparent")) %>%
-      layout(xaxis = list(title = "Date", rangeslider = list(type = "date"), gridcolor = '#333333'),
-             yaxis = list(title = "Adjusted Price", gridcolor = '#333333'),
-             hovermode = "x unified",
-             paper_bgcolor = 'rgba(0,0,0,0)', plot_bgcolor = 'rgba(0,0,0,0)',
-             font = list(color = '#E0E0E0'))
+      layout(xaxis = list(title = "Date", rangeslider = list(type = "date"), gridcolor = '#333333'), yaxis = list(title = "Adjusted Price", gridcolor = '#333333'), hovermode = "x unified", paper_bgcolor = 'rgba(0,0,0,0)', plot_bgcolor = 'rgba(0,0,0,0)', font = list(color = '#E0E0E0'))
   })
 }
 
-# -----------------------------
-# Run application
-# -----------------------------
 shinyApp(ui = ui, server = server)
